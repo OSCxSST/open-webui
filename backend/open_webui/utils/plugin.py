@@ -6,13 +6,51 @@ from importlib import util
 import types
 import tempfile
 import logging
+import asyncio
+import json
+import base64
 
 from open_webui.env import SRC_LOG_LEVELS, PIP_OPTIONS, PIP_PACKAGE_INDEX_OPTIONS
+from open_webui.config import ENABLE_INSECURE_TOOL_EXECUTION
 from open_webui.models.functions import Functions
 from open_webui.models.tools import Tools
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
+
+async def execute_in_sandbox(code_content, params=None):
+    """Execute code in sandbox subprocess."""
+    if params is None:
+        params = {}
+    
+    try:
+        # Prepare input for sandbox
+        input_data = {
+            "code": base64.b64encode(code_content.encode('utf-8')).decode('ascii'),
+            "params": params
+        }
+        
+        # Start sandbox subprocess
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "open_webui.sandbox.runner",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Send input and get result
+        stdout, stderr = await process.communicate(json.dumps(input_data).encode())
+        
+        if process.returncode != 0:
+            return {"ok": False, "error": f"Sandbox process failed: {stderr.decode()}"}
+        
+        # Parse result
+        result = json.loads(stdout.decode())
+        return result
+        
+    except Exception as e:
+        return {"ok": False, "error": f"Sandbox execution error: {str(e)}"}
 
 
 def extract_frontmatter(content):
@@ -68,7 +106,7 @@ def replace_imports(content):
     return content
 
 
-def load_tool_module_by_id(tool_id, content=None):
+async def load_tool_module_by_id(tool_id, content=None):
 
     if content is None:
         tool = Tools.get_tool_by_id(tool_id)
@@ -97,8 +135,22 @@ def load_tool_module_by_id(tool_id, content=None):
             f.write(content)
         module.__dict__["__file__"] = temp_file.name
 
-        # Executing the modified content in the created module's namespace
-        exec(content, module.__dict__)
+        # Execute content via sandbox or legacy exec
+        if ENABLE_INSECURE_TOOL_EXECUTION:
+            # Legacy insecure execution (backwards compatibility)
+            exec(content, module.__dict__)
+        else:
+            # Secure sandbox execution
+            result = await execute_in_sandbox(content)
+            if not result.get("ok", False):
+                raise Exception(f"Sandbox execution failed: {result.get('error', 'Unknown error')}")
+            # For tools, we need to create a Tools class that returns the result
+            class SandboxTools:
+                def __init__(self):
+                    self.result = result.get("result", "")
+                def run(self, **kwargs):
+                    return self.result
+            module.Tools = SandboxTools
         frontmatter = extract_frontmatter(content)
         log.info(f"Loaded module: {module.__name__}")
 
@@ -115,7 +167,7 @@ def load_tool_module_by_id(tool_id, content=None):
         os.unlink(temp_file.name)
 
 
-def load_function_module_by_id(function_id: str, content: str | None = None):
+async def load_function_module_by_id(function_id: str, content: str | None = None):
     if content is None:
         function = Functions.get_function_by_id(function_id)
         if not function:
@@ -141,8 +193,28 @@ def load_function_module_by_id(function_id: str, content: str | None = None):
             f.write(content)
         module.__dict__["__file__"] = temp_file.name
 
-        # Execute the modified content in the created module's namespace
-        exec(content, module.__dict__)
+        # Execute content via sandbox or legacy exec
+        if ENABLE_INSECURE_TOOL_EXECUTION:
+            # Legacy insecure execution (backwards compatibility)
+            exec(content, module.__dict__)
+        else:
+            # Secure sandbox execution
+            result = await execute_in_sandbox(content)
+            if not result.get("ok", False):
+                raise Exception(f"Sandbox execution failed: {result.get('error', 'Unknown error')}")
+            # For functions, we need to create appropriate class that returns the result
+            class SandboxFunction:
+                def __init__(self):
+                    self.result = result.get("result", "")
+                def run(self, **kwargs):
+                    return self.result
+            # Determine function type and assign appropriate class
+            if "Pipe" in content:
+                module.Pipe = SandboxFunction
+            elif "Filter" in content:
+                module.Filter = SandboxFunction
+            elif "Action" in content:
+                module.Action = SandboxFunction
         frontmatter = extract_frontmatter(content)
         log.info(f"Loaded module: {module.__name__}")
 
@@ -223,20 +295,9 @@ def get_function_module_from_cache(request, function_id, load_from_db=True):
 
 
 def install_frontmatter_requirements(requirements: str):
+    # Runtime pip install removed for security
     if requirements:
-        try:
-            req_list = [req.strip() for req in requirements.split(",")]
-            log.info(f"Installing requirements: {' '.join(req_list)}")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install"]
-                + PIP_OPTIONS
-                + req_list
-                + PIP_PACKAGE_INDEX_OPTIONS
-            )
-        except Exception as e:
-            log.error(f"Error installing packages: {' '.join(req_list)}")
-            raise e
-
+        log.warning(f"Runtime pip install disabled for security. Pre-install these dependencies: {requirements}")
     else:
         log.info("No requirements found in frontmatter.")
 
@@ -265,6 +326,7 @@ def install_tool_and_function_dependencies():
                 if dependencies := frontmatter.get("requirements"):
                     all_dependencies += f"{dependencies}, "
 
-        install_frontmatter_requirements(all_dependencies.strip(", "))
+        # Dependencies must be pre-installed for security
+        log.info(f"Dependencies found but runtime install disabled: {all_dependencies.strip(', ')}")
     except Exception as e:
         log.error(f"Error installing requirements: {e}")
