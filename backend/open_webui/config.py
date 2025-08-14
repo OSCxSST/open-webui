@@ -3238,3 +3238,10 @@ LDAP_ATTRIBUTE_FOR_GROUPS = PersistentConfig(
     "ldap.server.attribute_for_groups",
     os.environ.get("LDAP_ATTRIBUTE_FOR_GROUPS", "memberOf"),
 )
+
+# Security: Tool/Function Execution Mode
+ENABLE_INSECURE_TOOL_EXECUTION = PersistentConfig(
+    "ENABLE_INSECURE_TOOL_EXECUTION",
+    "security.tools.enable_insecure_execution", 
+    os.environ.get("ENABLE_INSECURE_TOOL_EXECUTION", "False").lower() == "true",
+)
