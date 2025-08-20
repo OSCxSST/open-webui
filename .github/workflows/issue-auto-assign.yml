@@ -1,0 +1,16 @@
+name: Auto Assign Issues
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  auto-assign:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write  # needed to assign
+    steps:
+      - name: Assign issue to creator
+        uses: actions-ecosystem/action-assign@v2
+        with:
+          assignees: ${{ github.event.issue.user.login }}
